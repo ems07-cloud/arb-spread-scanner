@@ -1,0 +1,20 @@
+# окружение
+.venv/
+__pycache__/
+*.pyc
+
+# секреты и локальные данные
+.env
+config.local.yaml
+config.yaml
+
+# состояние и логи бота
+*.sqlite
+*.sqlite-journal
+*.log
+
+# зонды/временные заметки
+probe_ru.txt
+rapira_probe.txt
+rap2.txt
+rap3.txt

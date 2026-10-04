@@ -1,0 +1,253 @@
+# ============================================================================
+# Конфиг сканера арбитражных спредов (read-only).
+# Все комиссии — ДОЛЯ (0.001 = 0.1%).
+#
+# ТОЧНЫЕ КОМИССИИ: задай read-only ключи (см. блок `keys` у площадки ниже) —
+# тогда бот сам подтянет твою настоящую torg-комиссию и текущую сетевую комиссию.
+# Значения `fees` в конфиге используются как ЗАПАСНЫЕ, если live недоступна.
+# Ключи кладём в переменные окружения (не в этот файл!), здесь — только их ИМЕНА.
+# Ключи обязаны быть БЕЗ прав на торговлю и вывод.
+# ============================================================================
+
+poll_interval: 10          # интервал опроса, сек (ниже 5 для P2P — риск бана 429)
+daily_summary_seconds: 86400  # сводка из истории в TG раз в N сек (0 = выкл; 86400 = раз в сутки)
+
+# Банки/способы оплаты ПОЛЬЗОВАТЕЛЯ. Применяется ко ВСЕМ P2P-ногам: бот считает прибыль и
+# шлёт окна только по офферам, которые ты реально можешь оплатить. Пусто = все банки.
+#   HTX-имена: Tinkoff, Sberbank, "SBP - Fast Bank Transfer", Sovkombank, PSB, OTP
+#   Bybit-ID: 14=Tinkoff, 18=Sberbank, 75/377/585=SBP, 64=Raiffeisen, 90=Rosbank
+# pay_methods: [Tinkoff, Sberbank, "SBP - Fast Bank Transfer", "14", "18", "75"]
+pay_methods: []
+autosize: true             # подбирать макс. объём при спреде >= порога и показывать в алерте
+fee_refresh_seconds: 1800  # как часто обновлять живые комиссии по ключам
+heartbeat_seconds: 0       # период «я жив» в Telegram (0 = выкл; напр. 86400 = раз в сутки)
+health_fail_threshold: 5   # сколько ошибок площадки подряд до алерта «недоступна»
+log_file: arb_scanner.log
+db_path: arb_state.sqlite
+
+http:
+  timeout: 10
+  max_retries: 3
+  concurrency: 8
+  user_agent: "arb-scanner/0.1 (+read-only)"
+
+thresholds:
+  min_net_spread_pct: 1.0   # минимальный ЧИСТЫЙ спред в %
+  min_abs_profit: 10.0      # минимальная абсолютная прибыль (в валюте котировки маршрута)
+  cooldown_seconds: 120     # не повторять алерт по одному маршруту чаще, чем раз в N сек (0 = слать каждый раз)
+  realert_improve_pct: 0.3  # ...но повторить раньше, если спред вырос на N п.п.
+  confirmations: 1          # окно должно пройти пороги N опросов подряд (P2P-данные дёрганые; от спама защищает кулдаун)
+  max_net_spread_pct: 12.0  # жёсткий потолок: спред выше = почти всегда выброс данных, алерт подавляется (0 = выкл)
+  p2p_outlier_pct: 0.25     # отбрасывать P2P-офферы дальше 25% от медианы стороны (чистит одиночные аномалии; 0 = выкл)
+  # --- РЕЖИМ «ЖЕЛЕЗОБЕТОН»: слать в Telegram ТОЛЬКО достоверные, реально исполнимые окна ---
+  reliable_only: true       # true = слать только окна, прошедшие ВСЕ проверки достоверности (остальное копится в историю, но не шлётся)
+  solid_max_spread_pct: 8.0 # выше этого спред для RU-P2P почти всегда иллюзорен -> не «железобетон»
+  solid_min_depth_ratio: 1.1  # глубина должна покрывать объём хотя бы в N раз (РФ P2P тонкий, 1.5 = тишина)
+  solid_min_completion: 0.97  # минимальный % исполнения у мерчанта P2P-ноги
+  solid_min_orders: 50        # минимум завершённых сделок у мерчанта P2P-ноги
+  solid_max_merchants: 8      # макс. число отдельных P2P-сделок на ногу (РФ офферы мелкие, 3 = тишина)
+  allow_no_depth: true        # пускать окна с непроверяемой глубиной (Rapira: спот↔спот, но без стакана) с пометкой ⚠️
+
+telegram:
+  enabled: true
+  # Секреты прямо в файле (как просил). НЕ коммить config.yaml в git (он в .gitignore).
+  # Альтернатива — env-переменные через bot_token_env / chat_id_env (если захочешь вернуть).
+  bot_token: "ВСТАВЬ_ТОКЕН_ОТ_BotFather"   # от @BotFather
+  chat_id: "ВСТАВЬ_СВОЙ_CHAT_ID"        # узнать у @userinfobot
+
+# ----------------------------------------------------------------------------
+# АВТО-ГЕНЕРАЦИЯ маршрутов: бот сам строит ВСЕ 2-ногие связки из описания монета×
+# площадка (типы spot_to_p2p | p2p_to_p2p | spot_to_spot, обе стороны). Это заменяет
+# ручные cross-маршруты (они удалены ниже, чтобы не было дублей). В routes остаются
+# только то, что авто не строит: цепочки и треугольники. Добавил площадку/монету в
+# `coins` — маршруты создаются сами.
+# ----------------------------------------------------------------------------
+auto:
+  enabled: true
+  quote: RUB
+  poll_interval: 5                                 # частота опроса авто-маршрутов
+  types: [spot_to_p2p, p2p_to_p2p, spot_to_spot, p2p_internal]   # +p2p_internal: спред внутри P2P одной биржи
+  filters: { min_completion: 0.97, min_orders: 50, online_only: true, rows: 20 }
+  # Фильтр по способам оплаты (банкам). Оффер учитывается, только если платится одним
+  # из этих методов. Можно указывать НАЗВАНИЯ (для HTX) и/или ID (для Bybit) — каждая
+  # площадка матчит своё. Пусто/закомментировано = все методы. Так цены становятся
+  # реалистичными (лучшая цена часто требует банк, которого у тебя нет).
+  #   HTX-имена: Tinkoff, Sberbank, "SBP - Fast Bank Transfer", Sovkombank, PSB, OTP, "Bank Transfer"
+  #   Bybit-ID (проверь): 14=Tinkoff, 18=Sberbank, 75/377/585=SBP, 64=Raiffeisen, 90=Rosbank
+  # pay_methods: [Tinkoff, "SBP - Fast Bank Transfer", "14", "75"]
+  coins:
+    # ТОЛЬКО USDT: перевод TRC20 быстрый и дешёвый -> окна реально исполнимы («железобетон»).
+    USDT:
+      size: 1000
+      max_size: 50000
+      network: { coin: 1.0, net: TRX }
+      venues:
+        exmo_spot: USDT_RUB
+        rapira_spot: "USDT/RUB"
+        bybit_p2p_rub: { asset: USDT, fiat: RUB }
+        htx_p2p_rub: { coin_id: 2, currency_id: 11 }
+    # USDC: спота в RUB нет (Exmo/Rapira не торгуют) -> только P2P<->P2P (Bybit<->HTX),
+    # перевод USDC по TRC20 быстрый. HTX coin_id=7 = USDC (проверено живым зондом).
+    USDC:
+      size: 1000
+      max_size: 50000
+      network: { coin: 1.0, net: TRX }
+      venues:
+        bybit_p2p_rub: { asset: USDC, fiat: RUB }
+        htx_p2p_rub: { coin_id: 7, currency_id: 11 }
+    # --- BTC/ETH P2P ОТКЛЮЧЕНЫ: медленный он-чейн перевод (BTC/ETH) = ценовой риск за время
+    #     перевода + много иллюзорных +18% (мерчант не завершит). Режим «железобетон» их бы
+    #     всё равно отсеял. Раскомментируй, если захочешь вернуть.
+    # BTC:
+    #   size: 0.02
+    #   max_size: 0.5
+    #   network: { coin: 0.0002, net: BTC }
+    #   venues:
+    #     exmo_spot: BTC_RUB
+    #     bybit_p2p_rub: { asset: BTC, fiat: RUB }
+    #     htx_p2p_rub: { coin_id: 1, currency_id: 11 }
+    # ETH:
+    #   size: 0.5
+    #   max_size: 10
+    #   network: { coin: 0.003, net: ETH }
+    #   venues:
+    #     exmo_spot: ETH_RUB
+    #     bybit_p2p_rub: { asset: ETH, fiat: RUB }
+    #     htx_p2p_rub: { coin_id: 3, currency_id: 11 }
+
+# ----------------------------------------------------------------------------
+# Площадки. kind: spot | p2p.
+# Адаптеры: binance_spot | bybit_spot | okx_spot | binance_p2p | bybit_p2p
+# СЕЙЧАС АКТИВЕН ТОЛЬКО BYBIT. Остальное закомментировано (Binance/OKX в РФ
+# рублёвый P2P свернули; включишь обратно — раскомментируй нужный блок).
+# ----------------------------------------------------------------------------
+venues:
+  bybit_spot:
+    adapter: bybit_spot
+    kind: spot
+    rate_min_interval: 0.3
+    fees: { taker: 0.001, maker: 0.001 }
+    # READ-ONLY ключи прямо в файле (как просил). НЕ коммить config.yaml в git.
+    keys:
+      api_key: ""
+      api_secret: ""
+
+  bybit_p2p_rub:
+    adapter: bybit_p2p
+    kind: p2p
+    rate_min_interval: 0.5
+    # P2P-сбор Bybit для тейкера обычно 0; payment_cost — твои издержки платёжки.
+    fees: { taker: 0.0, p2p: 0.0, payment_cost: 0.0 }
+
+  exmo_spot:
+    adapter: exmo_spot
+    kind: spot
+    rate_min_interval: 0.5
+    # Exmo: taker/maker обычно 0.3%. Эндпоинт принудительно .me (РФ-пары).
+    fees: { taker: 0.003, maker: 0.003 }
+
+  htx_p2p_rub:
+    adapter: htx_p2p
+    kind: p2p
+    rate_min_interval: 1.0
+    # P2P-сбор HTX для тейкера обычно 0; payment_cost — твои издержки платёжки.
+    fees: { taker: 0.0, p2p: 0.0, payment_cost: 0.0 }
+
+  rapira_spot:
+    adapter: rapira_spot
+    kind: spot
+    rate_min_interval: 0.5
+    # Rapira — рос. биржа, спот USDT/RUB. Комиссия тейкера ~0.2%.
+    # ВНИМАНИЕ: публичного стакана нет — только топ-цена, глубина НЕ проверяется.
+    fees: { taker: 0.002, maker: 0.002 }
+
+  # --- ЗАКОММЕНТИРОВАНО (не работает в РФ для RUB P2P) ---
+  # binance_spot:
+  #   adapter: binance_spot
+  #   kind: spot
+  #   rate_min_interval: 0.3
+  #   fees: { taker: 0.001, maker: 0.001 }
+  #   # keys: { api_key_env: BINANCE_KEY, api_secret_env: BINANCE_SECRET }
+  #
+  # okx_spot:
+  #   adapter: okx_spot
+  #   kind: spot
+  #   rate_min_interval: 0.3
+  #   fees: { taker: 0.001, maker: 0.0008 }
+  #   # keys: { api_key_env: OKX_KEY, api_secret_env: OKX_SECRET, passphrase_env: OKX_PASSPHRASE }
+  #
+  # binance_p2p_rub:
+  #   adapter: binance_p2p
+  #   kind: p2p
+  #   rate_min_interval: 1.0
+  #   fees: { taker: 0.0, p2p: 0.0, payment_cost: 0.0 }
+
+# ----------------------------------------------------------------------------
+# Маршруты (связки). Каждый — нога buy (где покупаю базу) и нога sell (где продаю).
+# Обе ноги ДОЛЖНЫ быть в одной валюте котировки (quote). Кросс-конвертация не поддержана.
+# ----------------------------------------------------------------------------
+routes:
+  # (Ручные USDT/BTC/ETH cross-маршруты удалены — их строит авто-генератор выше.)
+
+  # МНОГОНОГИЙ маршрут (цепочка-цикл). Начинается и кончается в одной валюте.
+  # Пример: RUB -> купить USDT на Bybit P2P -> продать USDT обратно за RUB.
+  # Каждый шаг: op (buy/sell), give (валюта входа), get (валюта выхода) + параметры
+  # площадки. transfer_fee_coin — сетевой сбор за перевод get-актива (если он есть).
+  - name: "RUB->USDT->RUB Bybit P2P"
+    start_currency: RUB
+    start_amount: 100000
+    legs:
+      - { venue: bybit_p2p_rub, op: buy,  give: RUB,  get: USDT, asset: USDT, fiat: RUB, rows: 20 }
+      - { venue: bybit_p2p_rub, op: sell, give: USDT, get: RUB,  asset: USDT, fiat: RUB, rows: 20 }
+
+  # USDC-ПРЕМИЯ цепочкой ВНУТРИ Bybit (без сетевых переводов — всё на одном аккаунте):
+  # RUB -> купить USDT на P2P -> на споте USDT->USDC -> продать USDC на P2P (премия).
+  # transfer_fee_coin=0: монета не покидает биржу.
+  - name: "RUB->USDT->USDC->RUB Bybit"
+    start_currency: RUB
+    start_amount: 100000
+    legs:
+      - { venue: bybit_p2p_rub, op: buy,  give: RUB,  get: USDT, asset: USDT, fiat: RUB, rows: 20 }
+      - { venue: bybit_spot,    op: buy,  give: USDT, get: USDC, symbol: USDCUSDT, depth: 50 }
+      - { venue: bybit_p2p_rub, op: sell, give: USDC, get: RUB,  asset: USDC, fiat: RUB, rows: 20 }
+
+  # ТРИАНГУЛЯРНЫЙ спот-арбитраж внутри Exmo (без P2P и переводов, исполняется быстро).
+  # implied USDT/RUB через BTC сравнивается с прямым. Обычно ~0 (рынок эффективен),
+  # но редкие окна ловятся. Это цепочка: RUB->USDT->BTC->RUB на споте Exmo.
+  - name: "Триангл Exmo RUB->USDT->BTC->RUB"
+    start_currency: RUB
+    start_amount: 100000
+    poll_interval: 5
+    legs:
+      - { venue: exmo_spot, op: buy,  give: RUB,  get: USDT, symbol: USDT_RUB, depth: 50 }
+      - { venue: exmo_spot, op: buy,  give: USDT, get: BTC,  symbol: BTC_USDT, depth: 50 }
+      - { venue: exmo_spot, op: sell, give: BTC,  get: RUB,  symbol: BTC_RUB,  depth: 50 }
+
+  # Обратный треугольник через ETH.
+  - name: "Триангл Exmo RUB->ETH->USDT->RUB"
+    start_currency: RUB
+    start_amount: 100000
+    poll_interval: 5
+    legs:
+      - { venue: exmo_spot, op: buy,  give: RUB,  get: ETH,  symbol: ETH_RUB,  depth: 50 }
+      - { venue: exmo_spot, op: sell, give: ETH,  get: USDT, symbol: ETH_USDT, depth: 50 }
+      - { venue: exmo_spot, op: sell, give: USDT, get: RUB,  symbol: USDT_RUB, depth: 50 }
+
+  # --- ЗАКОММЕНТИРОВАНО (нужны Binance/OKX, в РФ для RUB не работают) ---
+  # - name: "BTC binance->okx"
+  #   base: BTC
+  #   quote: USDT
+  #   size_base: 0.05
+  #   network: BTC
+  #   network_fee_coin: 0.0002
+  #   buy:  { venue: binance_spot, symbol: BTCUSDT, depth: 100 }
+  #   sell: { venue: okx_spot,     symbol: BTC-USDT, depth: 50 }
+  #
+  # - name: "BTC okx->binance"
+  #   base: BTC
+  #   quote: USDT
+  #   size_base: 0.05
+  #   network: BTC
+  #   network_fee_coin: 0.0002
+  #   buy:  { venue: okx_spot,     symbol: BTC-USDT, depth: 50 }
+  #   sell: { venue: binance_spot, symbol: BTCUSDT, depth: 100 }
